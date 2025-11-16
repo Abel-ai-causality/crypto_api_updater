@@ -20,7 +20,9 @@ dependencies = [
     "requests",
     "uvicorn (>=0.24.0)",
     "psycopg2-binary",
-    "sqlalchemy"
+    "sqlalchemy",
+    "dotenv (>=0.9.9,<0.10.0)",
+    "pyarrow (>=22.0.0,<23.0.0)"
 ]
 
 [tool.poetry.group.dev.dependencies]

@@ -4,13 +4,19 @@ Financial Modeling Prep (FMP) API Wrapper
 Provides functions for retrieving 1-minute cryptocurrency data and scheduled updates
 """
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
 import pandas as pd
 import requests
 import time
 import logging
-from typing import List, Optional
+from typing import List
 
-API_KEY = "Fg717Owfnfye5r2HQVIhDuBTefMJs7uA"
+load_dotenv()
+API_KEY = os.getenv("FMP_API_KEY", "")
+
+# Import configuration
+from config import DATA_PATH_FORMAT
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_1min_historical_data(symbol: str, start_date: str, end_date: str, 
-                             api_key: str = API_KEY) -> pd.DataFrame:
+                             api_key: str = API_KEY, 
+                             save_to_parquet: bool = True) -> pd.DataFrame:
     """
     获取指定时间段内的1分钟历史数据
     
@@ -27,6 +34,7 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
         start_date: 开始日期 (格式: "YYYY-MM-DD")
         end_date: 结束日期 (格式: "YYYY-MM-DD")
         api_key: FMP API密钥
+        save_to_parquet: 是否保存数据到parquet文件，默认为True
     
     Returns:
         包含1分钟历史数据的DataFrame
@@ -90,9 +98,231 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
     # 拼接所有数据
     if all_data:
         full_df = pd.concat(all_data, ignore_index=True)
+        if save_to_parquet and not full_df.empty:
+            save_to_parquet_file(full_df, symbol)
         return full_df
     else:
         return pd.DataFrame()
+
+
+
+def save_to_parquet_file(df: pd.DataFrame, symbol: str) -> None:
+    """
+    将DataFrame保存到parquet文件，按照年份组织，追加到现有数据
+    
+    Args:
+        df: 包含历史数据的DataFrame
+        symbol: 加密货币符号
+    """
+    if df.empty or 'date' not in df.columns:
+        logger.warning("DataFrame is empty or missing 'date' column, cannot save to parquet")
+        return
+
+    # Ensure the date column is datetime type
+    df['date'] = pd.to_datetime(df['date'])
+
+    # Group by year to create separate files
+    grouped = df.groupby(df['date'].dt.year)
+
+    for year, year_df in grouped:
+        # Create the path with the year included
+        file_path = DATA_PATH_FORMAT.format(market="crypto", freq="1min", symbol=symbol, year=year)
+
+        # Create directory if it doesn't exist
+        directory = os.path.dirname(file_path)
+        os.makedirs(directory, exist_ok=True)
+
+        # Check if the file already exists
+        if os.path.exists(file_path):
+            # Load existing data
+            existing_df = pd.read_parquet(file_path)
+            
+            # Combine with new data and remove duplicates
+            combined_df = pd.concat([existing_df, year_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['date'], keep='last')
+            combined_df = combined_df.sort_values('date')
+            
+            # Save to parquet
+            combined_df.to_parquet(file_path, index=False)
+            logger.info(f"Updated {file_path} with {len(year_df)} new rows, total rows: {len(combined_df)}")
+        else:
+            # Save new data to parquet
+            year_df.to_parquet(file_path, index=False)
+            logger.info(f"Saved {len(year_df)} rows to new file {file_path}")
+
+
+def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
+    """
+    获取指定加密货币的最新数据
+
+    Args:
+        symbol: 加密货币符号
+        limit: 返回的最新记录数
+
+    Returns:
+        包含最新数据的DataFrame
+    """
+    # Find the most recent year for the symbol
+    base_path = os.path.join(os.getenv("BASE_DATA_DIR", "/root/data"), "crypto", "1min", symbol)
+    
+    if not os.path.exists(base_path):
+        logger.warning(f"No existing data found for symbol {symbol}")
+        return pd.DataFrame()
+    
+    # Find all year directories
+    years = [d for d in os.listdir(base_path) 
+             if os.path.isdir(os.path.join(base_path, d)) and d.isdigit()]
+    
+    if not years:
+        logger.warning(f"No year directories found for symbol {symbol}")
+        return pd.DataFrame()
+    
+    # Sort years in descending order to get the most recent first
+    years.sort(reverse=True)
+    
+    all_data = []
+    rows_needed = limit
+    
+    for year in years:
+        file_path = os.path.join(base_path, year, "data.parquet")
+        
+        if os.path.exists(file_path):
+            try:
+                df = pd.read_parquet(file_path)
+                df = df.sort_values('date', ascending=False)  # Sort descending to get latest first
+                
+                if len(df) >= rows_needed:
+                    all_data.append(df.head(rows_needed))
+                    break
+                else:
+                    all_data.append(df)
+                    rows_needed -= len(df)
+                    
+                if rows_needed <= 0:
+                    break
+            except Exception as e:
+                logger.error(f"Error reading data for {symbol} from {file_path}: {e}")
+    
+    if all_data:
+        result = pd.concat(all_data, ignore_index=True)
+        result = result.sort_values('date', ascending=False)  # Most recent first
+        return result.head(limit).sort_values('date')  # Return requested number, sorted chronologically
+    else:
+        return pd.DataFrame()
+
+
+def get_minute_update(symbol: str, api_key: str = API_KEY) -> pd.DataFrame:
+    """
+    获取过去1分钟的最新数据，用于分钟级更新
+
+    Args:
+        symbol: 加密货币符号
+        api_key: API密钥
+
+    Returns:
+        包含最新1分钟数据的DataFrame
+    """
+    # Get the latest stored data time
+    latest_df = get_latest_data(symbol, limit=1)
+    
+    if not latest_df.empty and 'date' in latest_df.columns:
+        # Get the most recent date from stored data
+        last_date = latest_df['date'].max()
+        
+        # Start from one minute after the last stored data
+        start_time = last_date + timedelta(minutes=1)
+    else:
+        # If no previous data, get data from a day ago
+        start_time = datetime.now() - timedelta(days=1)
+    
+    # Format as required by API
+    start_str = start_time.strftime("%Y-%m-%d")
+    end_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # Fetch data from API
+    try:
+        url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
+        resp = requests.get(url, timeout=10)
+
+        if resp.status_code != 200:
+            logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
+            return pd.DataFrame()
+
+        data = resp.json()
+
+        if data and isinstance(data, list):
+            df = pd.DataFrame(data)
+
+            # Ensure DataFrame has data and contains the necessary columns
+            if not df.empty and 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                
+                # Filter to only include new data after our last stored time
+                if not latest_df.empty:
+                    df = df[df['date'] > last_date]
+                
+                df = df.sort_values("date")
+                return df
+            else:
+                logger.warning(f"No valid data received for {symbol}")
+                return pd.DataFrame()
+        else:
+            logger.warning(f"No data received for {symbol}")
+            return pd.DataFrame()
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed for {symbol}: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error processing data for {symbol}: {e}")
+        return pd.DataFrame()
+
+
+def minute_update(symbol: str, api_key: str = API_KEY) -> dict:
+    """
+    执行单个符号的分钟级更新
+
+    Args:
+        symbol: 加密货币符号
+        api_key: API密钥
+
+    Returns:
+        更新结果的字典
+    """
+    try:
+        logger.info(f"Starting minute update for {symbol}...")
+        
+        # Get the latest minute data
+        new_data = get_minute_update(symbol, api_key)
+        
+        if not new_data.empty:
+            # Save the new data to parquet files
+            save_to_parquet_file(new_data, symbol)
+            
+            result = {
+                "status": "success",
+                "rows_inserted": len(new_data),
+                "date_range": [str(new_data['date'].min()), str(new_data['date'].max())] 
+                              if 'date' in new_data.columns else "N/A"
+            }
+            logger.info(f"Minute update for {symbol} completed: {len(new_data)} rows added")
+        else:
+            result = {
+                "status": "success",
+                "rows_inserted": 0,
+                "message": "No new data to insert"
+            }
+            logger.info(f"Minute update for {symbol}: No new data")
+            
+        return result
+        
+    except Exception as e:
+        result = {
+            "status": "error",
+            "error_message": str(e)
+        }
+        logger.error(f"Error in minute update for {symbol}: {e}")
+        return result
 
 
 def scheduled_update(symbols: List[str], 
@@ -214,23 +444,13 @@ def fetch_full_data(symbol: str, key: str, start_date: str, end_date: str) -> pd
 
 
 if __name__ == '__main__':
-    # Example usage of the new functions
-    # Load symbols to update (with fallback if files not available)
-    get_1min_historical_data("BTCUSD", start_date="2025-10-01", end_date="2025-10-31")
 
-    try:
-        all_coins = pd.read_csv("all_data.csv")
-        fmp_list = pd.read_csv("symbol_list.csv")
-        fmp_list["exchg_symbol"] = fmp_list["symbol"].str.replace("USD", "", case=False).str.lower()
-        filtered_symbols = fmp_list.loc[fmp_list["exchg_symbol"].isin(all_coins["symbol"])]
+    # history
+    symbols_to_update = ["BTCUSD", "ETHUSD", "DOGEUSD", "SOLUSD", "BNBUSD", "XRPUSD"]
+    for symbol in symbols_to_update:
+        a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
 
-        # Get the symbols to update
-        symbols_to_update = filtered_symbols["symbol"].tolist()[:5]  # Only first 5 for testing
-    except FileNotFoundError:
-        # Fallback to a simple test case
-        symbols_to_update = ["BTCUSD"]  # Default to Bitcoin for testing
-        print("CSV files not found, using BTCUSD as default for testing")
-
+    # update
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
 
     # Perform the scheduled update (without writing to DB for testing)
@@ -239,3 +459,9 @@ if __name__ == '__main__':
     # Print results
     for symbol, result in update_results.items():
         logger.info(f"{symbol}: {result}")
+    
+    # Demonstrate minute-level updates
+    logger.info("Starting minute-level updates...")
+    for symbol in symbols_to_update:  # Only test with first 2 symbols
+        minute_result = minute_update(symbol)
+        logger.info(f"Minute update for {symbol}: {minute_result}")
