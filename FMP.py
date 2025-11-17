@@ -274,7 +274,6 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
 
 
 def scheduled_update(symbols: List[str],
-                     update_interval: str = "1m",
                      api_key: str = API_KEY,
                      db_table_prefix: str = "FMP",
                      write_to_database: bool = False) -> dict:
@@ -283,10 +282,9 @@ def scheduled_update(symbols: List[str],
 
     Args:
         symbols: 要更新的加密货币符号列表
-        update_interval: 更新间隔，支持小时(h)和分钟(m)，如"1h", "30m"，默认为"1min"
         api_key: FMP API密钥
         db_table_prefix: 数据库表名前缀
-        write_to_database: 是否写入数据库，默认为True
+        write_to_database: 是否写入数据库，默认为False
 
     Returns:
         更新结果的字典
@@ -294,25 +292,6 @@ def scheduled_update(symbols: List[str],
     # Import here to make it optional
     if write_to_database:
         from db_info import write_to_db
-
-    def parse_interval(interval_str):
-        """
-        解析时间间隔字符串，支持小时(h)和分钟(m)
-        例如: "1h" 表示1小时，"30m" 表示30分钟
-        """
-        interval_str = interval_str.lower().strip()
-        if interval_str.endswith('h'):
-            # 小时
-            value = int(interval_str[:-1])
-            return timedelta(hours=value)
-        elif interval_str.endswith('m'):
-            # 分钟
-            value = int(interval_str[:-1])
-            return timedelta(minutes=value)
-        else:
-            # 默认按小时处理
-            value = int(interval_str)
-            return timedelta(hours=value)
 
     results = {}
 
@@ -336,9 +315,8 @@ def scheduled_update(symbols: List[str],
 
                 logger.info(f"Latest data for {symbol} found at {latest_date}, starting update from {start_date} {start_time}")
             else:
-                # 如果没有现有数据，则从指定时间间隔之前开始获取
-                interval_delta = parse_interval(update_interval)
-                start_date = (datetime.now() - interval_delta).strftime("%Y-%m-%d")
+                # 如果没有现有数据，则从30天前开始获取
+                start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
                 logger.info(f"No existing data for {symbol}, starting update from {start_date}")
 
             # 结束日期为今天
@@ -406,7 +384,7 @@ if __name__ == '__main__':
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
 
     # Perform the scheduled update (without writing to DB for testing)
-    update_results = scheduled_update(symbols=symbols_to_update, update_interval="1m", write_to_database=False)
+    update_results = scheduled_update(symbols=symbols_to_update, write_to_database=False)
 
     # Print results
     for symbol, result in update_results.items():
