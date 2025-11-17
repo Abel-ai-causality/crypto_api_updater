@@ -23,77 +23,139 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def get_1min_historical_data(symbol: str, start_date: str, end_date: str, 
-                             api_key: str = API_KEY, 
+def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
+                             api_key: str = API_KEY,
                              save_to_parquet: bool = True) -> pd.DataFrame:
     """
     获取指定时间段内的1分钟历史数据
-    
+
     Args:
         symbol: 加密货币符号 (e.g. "BTCUSD")
-        start_date: 开始日期 (格式: "YYYY-MM-DD")
+        start_date: 开始日期 (格式: "YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS")
         end_date: 结束日期 (格式: "YYYY-MM-DD")
         api_key: FMP API密钥
         save_to_parquet: 是否保存数据到parquet文件，默认为True
-    
+
     Returns:
         包含1分钟历史数据的DataFrame
     """
     # 将字符串日期转为datetime对象
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    # Handle both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" formats
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     
     # FMP的分钟数据API每次可返回最多5000条记录，约为3.47天的分钟数据
     # 使用3天的时间窗口确保在限制内
+    # If the start date includes time information, we still make requests by date
+    # but will filter the results afterwards
     delta = timedelta(days=3)
-    
+
     all_data = []
     current_start = start_dt
-    
-    while current_start <= end_dt:
-        current_end = min(current_start + delta, end_dt)
-        
-        # 转为字符串格式
-        start_str = current_start.strftime("%Y-%m-%d")
-        end_str = current_end.strftime("%Y-%m-%d")
-        
+
+    # If the start date includes time, we need to make sure to get the full day
+    # but then filter the results to start from the exact time
+    start_date_only = start_dt.date()
+    end_date_only = end_dt.date()
+
+    # Adjust current_start to date only for API requests
+    current_start = datetime.combine(current_start.date(), datetime.min.time())
+
+    # If we're starting from the same day as the end date and the start has time info
+    if start_date_only == end_date_only and start_dt != datetime.combine(start_dt.date(), datetime.min.time()):
+        # If start and end are the same day and start has time, just request that single day
+        start_str = start_date_only.strftime("%Y-%m-%d")
+        end_str = end_date_only.strftime("%Y-%m-%d")
+
         logger.info(f"Fetching 1min data for {symbol} from {start_str} to {end_str}...")
-        
+
         try:
             # FMP提供分钟级历史数据的API端点
             url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
             resp = requests.get(url, timeout=10)
-            
+
             if resp.status_code != 200:
                 logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
-                current_start = current_end + timedelta(days=1)
-                continue
-                
+                return pd.DataFrame()
+
             data = resp.json()
-            
+
             if data and isinstance(data, list):
                 df = pd.DataFrame(data)
-                
+
                 # 确保DataFrame有数据且包含必要的列
                 if not df.empty and 'date' in df.columns:
                     df['date'] = pd.to_datetime(df['date'])
+
+                    # Filter to only include data after the specified start time
+                    df = df[df['date'] >= start_dt]
+
                     df = df.sort_values("date")
                     all_data.append(df)
                 else:
                     logger.warning(f"No valid data received for {symbol} from {start_str} to {end_str}")
             else:
                 logger.warning(f"No data received for {symbol} from {start_str} to {end_str}")
-                
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed for {symbol} from {start_str} to {end_str}: {e}")
         except Exception as e:
             logger.error(f"Error processing data for {symbol} from {start_str} to {end_str}: {e}")
-        finally:
-            # 移动到下一个时间段
-            current_start = current_end + timedelta(days=1)
-            
-            # 添加延迟以避免API限频
-            time.sleep(0.25)
+    else:
+        # Handle multi-day requests
+        while current_start.date() <= end_dt.date():
+            current_end = min(current_start + delta, end_dt.replace(hour=23, minute=59, second=59))
+
+            # 转为字符串格式
+            start_str = current_start.strftime("%Y-%m-%d")
+            end_str = current_end.strftime("%Y-%m-%d")
+
+            logger.info(f"Fetching 1min data for {symbol} from {start_str} to {end_str}...")
+
+            try:
+                # FMP提供分钟级历史数据的API端点
+                url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
+                resp = requests.get(url, timeout=10)
+
+                if resp.status_code != 200:
+                    logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
+                    current_start = current_end + timedelta(days=1)
+                    continue
+
+                data = resp.json()
+
+                if data and isinstance(data, list):
+                    df = pd.DataFrame(data)
+
+                    # 确保DataFrame有数据且包含必要的列
+                    if not df.empty and 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+
+                        # For the first day, filter to only include data after the specified start time
+                        if current_start.date() == start_date_only and start_dt != datetime.combine(start_dt.date(), datetime.min.time()):
+                            df = df[df['date'] >= start_dt]
+
+                        df = df.sort_values("date")
+                        all_data.append(df)
+                    else:
+                        logger.warning(f"No valid data received for {symbol} from {start_str} to {end_str}")
+                else:
+                    logger.warning(f"No data received for {symbol} from {start_str} to {end_str}")
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request failed for {symbol} from {start_str} to {end_str}: {e}")
+            except Exception as e:
+                logger.error(f"Error processing data for {symbol} from {start_str} to {end_str}: {e}")
+            finally:
+                # 移动到下一个时间段
+                current_start = current_end + timedelta(days=1)
+
+                # 添加延迟以避免API限频
+                time.sleep(0.25)
     
     # 拼接所有数据
     if all_data:
@@ -211,169 +273,107 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_minute_update(symbol: str, api_key: str = API_KEY) -> pd.DataFrame:
-    """
-    获取过去1分钟的最新数据，用于分钟级更新
-
-    Args:
-        symbol: 加密货币符号
-        api_key: API密钥
-
-    Returns:
-        包含最新1分钟数据的DataFrame
-    """
-    # Get the latest stored data time
-    latest_df = get_latest_data(symbol, limit=1)
-    
-    if not latest_df.empty and 'date' in latest_df.columns:
-        # Get the most recent date from stored data
-        last_date = latest_df['date'].max()
-        
-        # Start from one minute after the last stored data
-        start_time = last_date + timedelta(minutes=1)
-    else:
-        # If no previous data, get data from a day ago
-        start_time = datetime.now() - timedelta(days=1)
-    
-    # Format as required by API
-    start_str = start_time.strftime("%Y-%m-%d")
-    end_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # Fetch data from API
-    try:
-        url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
-        resp = requests.get(url, timeout=10)
-
-        if resp.status_code != 200:
-            logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
-            return pd.DataFrame()
-
-        data = resp.json()
-
-        if data and isinstance(data, list):
-            df = pd.DataFrame(data)
-
-            # Ensure DataFrame has data and contains the necessary columns
-            if not df.empty and 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-                
-                # Filter to only include new data after our last stored time
-                if not latest_df.empty:
-                    df = df[df['date'] > last_date]
-                
-                df = df.sort_values("date")
-                return df
-            else:
-                logger.warning(f"No valid data received for {symbol}")
-                return pd.DataFrame()
-        else:
-            logger.warning(f"No data received for {symbol}")
-            return pd.DataFrame()
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed for {symbol}: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error processing data for {symbol}: {e}")
-        return pd.DataFrame()
-
-
-def minute_update(symbol: str, api_key: str = API_KEY) -> dict:
-    """
-    执行单个符号的分钟级更新
-
-    Args:
-        symbol: 加密货币符号
-        api_key: API密钥
-
-    Returns:
-        更新结果的字典
-    """
-    try:
-        logger.info(f"Starting minute update for {symbol}...")
-        
-        # Get the latest minute data
-        new_data = get_minute_update(symbol, api_key)
-        
-        if not new_data.empty:
-            # Save the new data to parquet files
-            save_to_parquet_file(new_data, symbol)
-            
-            result = {
-                "status": "success",
-                "rows_inserted": len(new_data),
-                "date_range": [str(new_data['date'].min()), str(new_data['date'].max())] 
-                              if 'date' in new_data.columns else "N/A"
-            }
-            logger.info(f"Minute update for {symbol} completed: {len(new_data)} rows added")
-        else:
-            result = {
-                "status": "success",
-                "rows_inserted": 0,
-                "message": "No new data to insert"
-            }
-            logger.info(f"Minute update for {symbol}: No new data")
-            
-        return result
-        
-    except Exception as e:
-        result = {
-            "status": "error",
-            "error_message": str(e)
-        }
-        logger.error(f"Error in minute update for {symbol}: {e}")
-        return result
-
-
-def scheduled_update(symbols: List[str], 
-                     lookback_days: int = 1, 
+def scheduled_update(symbols: List[str],
+                     update_interval: str = "1m",
                      api_key: str = API_KEY,
                      db_table_prefix: str = "FMP",
-                     write_to_database: bool = True) -> dict:
+                     write_to_database: bool = False) -> dict:
     """
     定时更新数据到数据库
-    
+
     Args:
         symbols: 要更新的加密货币符号列表
-        lookback_days: 回溯天数，默认为1天
+        update_interval: 更新间隔，支持小时(h)和分钟(m)，如"1h", "30m"，默认为"1min"
         api_key: FMP API密钥
         db_table_prefix: 数据库表名前缀
         write_to_database: 是否写入数据库，默认为True
-    
+
     Returns:
         更新结果的字典
     """
     # Import here to make it optional
     if write_to_database:
         from db_info import write_to_db
-    
+
+    def parse_interval(interval_str):
+        """
+        解析时间间隔字符串，支持小时(h)和分钟(m)
+        例如: "1h" 表示1小时，"30m" 表示30分钟
+        """
+        interval_str = interval_str.lower().strip()
+        if interval_str.endswith('h'):
+            # 小时
+            value = int(interval_str[:-1])
+            return timedelta(hours=value)
+        elif interval_str.endswith('m'):
+            # 分钟
+            value = int(interval_str[:-1])
+            return timedelta(minutes=value)
+        else:
+            # 默认按小时处理
+            value = int(interval_str)
+            return timedelta(hours=value)
+
     results = {}
-    
+
     for symbol in symbols:
         try:
             logger.info(f"Starting scheduled update for {symbol}...")
-            
-            # 计算开始和结束日期
-            end_date = datetime.today().strftime("%Y-%m-%d")
-            start_date = (datetime.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-            
+
+            # 查询已有的最新数据日期
+            latest_df = get_latest_data(symbol, limit=1)
+
+            if not latest_df.empty and 'date' in latest_df.columns:
+                # 获取最新数据的日期，并从下一分钟开始获取新数据
+                latest_date = latest_df['date'].max()
+                start_date = (latest_date + timedelta(minutes=1)).strftime("%Y-%m-%d")
+                start_time = latest_date.strftime("%H:%M:%S")
+
+                # 如果最新数据是今天之前的日期，则从当天00:00:00开始获取
+                if latest_date.date() < datetime.now().date():
+                    start_date = latest_date.strftime("%Y-%m-%d")
+                    start_time = "00:00:00"
+
+                logger.info(f"Latest data for {symbol} found at {latest_date}, starting update from {start_date} {start_time}")
+            else:
+                # 如果没有现有数据，则从指定时间间隔之前开始获取
+                interval_delta = parse_interval(update_interval)
+                start_date = (datetime.now() - interval_delta).strftime("%Y-%m-%d")
+                logger.info(f"No existing data for {symbol}, starting update from {start_date}")
+
+            # 结束日期为今天
+            end_date = datetime.now().strftime("%Y-%m-%d")
+
             # 获取数据
             data = get_1min_historical_data(symbol, start_date, end_date, api_key)
-            
+
             if not data.empty:
-                # 准备数据库表名
-                table_name = f"{db_table_prefix}_{symbol}_Min1"
-                
-                if write_to_database:
-                    # 写入数据库
-                    write_to_db(data, table_name)
-                    
-                results[symbol] = {
-                    "status": "success",
-                    "rows_inserted": len(data),
-                    "date_range": [str(data['date'].min()), str(data['date'].max())] if 'date' in data.columns else "N/A"
-                }
-                logger.info(f"Successfully updated {symbol}, {len(data)} rows inserted")
+                # 过滤数据，只保留从最新日期之后的数据（避免重复）
+                if not latest_df.empty and 'date' in latest_df.columns:
+                    latest_date = latest_df['date'].max()
+                    data = data[data['date'] > latest_date]
+
+                if not data.empty:
+                    # 准备数据库表名
+                    table_name = f"{db_table_prefix}_{symbol}_Min1"
+
+                    if write_to_database:
+                        # 写入数据库
+                        write_to_db(data, table_name)
+
+                    results[symbol] = {
+                        "status": "success",
+                        "rows_inserted": len(data),
+                        "date_range": [str(data['date'].min()), str(data['date'].max())] if 'date' in data.columns else "N/A"
+                    }
+                    logger.info(f"Successfully updated {symbol}, {len(data)} rows inserted")
+                else:
+                    results[symbol] = {
+                        "status": "success",
+                        "rows_inserted": 0,
+                        "message": "No new data to insert after filtering duplicates"
+                    }
+                    logger.info(f"No new data for {symbol} after filtering duplicates")
             else:
                 results[symbol] = {
                     "status": "success",
@@ -381,87 +381,33 @@ def scheduled_update(symbols: List[str],
                     "message": "No new data to insert"
                 }
                 logger.warning(f"No new data for {symbol}")
-                
+
         except Exception as e:
             results[symbol] = {
                 "status": "error",
                 "error_message": str(e)
             }
             logger.error(f"Error updating {symbol}: {e}")
-        
+
         # 添加延迟以避免API限频
         time.sleep(0.5)
-    
+
     return results
-
-
-def get_jsonparsed_data(symbol: str, key: str, start: str, end: str) -> pd.DataFrame:
-    """
-    获取1小时历史数据的辅助函数（保留原有功能）
-    """
-    url = f"https://financialmodelingprep.com/stable/historical-chart/1hour?symbol={symbol}&apikey={key}&from={start}&to={end}"
-    resp = requests.get(url, timeout=10)
-    data = resp.json()
-    return pd.DataFrame(data)
-
-
-def fetch_full_data(symbol: str, key: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    获取1小时历史数据（保留原有功能，但 with improved error handling）
-    """
-    all_data = []
-
-    # 将字符串日期转 datetime 对象
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-
-    # API 每次最多返回约 2140 条数据，大约 2140 小时 = 89 天左右
-    delta = timedelta(hours=2160)
-
-    current_start = start_dt
-    while current_start < end_dt:
-        current_end = min(current_start + delta, end_dt)
-        # 转为字符串
-        start_str = current_start.strftime("%Y-%m-%d")
-        end_str = current_end.strftime("%Y-%m-%d")
-        print(f"Fetching hourly data from {start_str} to {end_str}...")
-
-        try:
-            df = get_jsonparsed_data(symbol, key, start_str, end_str).sort_values("date")
-            if not df.empty:
-                all_data.append(df)
-        except Exception as e:
-            logger.error(f"Error fetching data for {symbol} from {start_str} to {end_str}: {e}")
-        finally:
-            current_start = current_end + timedelta(days=1)
-
-    # 拼接所有数据
-    if len(all_data) > 0:
-        full_df = pd.concat(all_data, ignore_index=True)
-    else:
-        full_df = pd.DataFrame()
-    return full_df
 
 
 if __name__ == '__main__':
 
     # history
     symbols_to_update = ["BTCUSD", "ETHUSD", "DOGEUSD", "SOLUSD", "BNBUSD", "XRPUSD"]
-    for symbol in symbols_to_update:
-        a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
+    # for symbol in symbols_to_update:
+    #     a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
 
     # update
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
 
     # Perform the scheduled update (without writing to DB for testing)
-    update_results = scheduled_update(symbols=symbols_to_update, lookback_days=1, write_to_database=False)
+    update_results = scheduled_update(symbols=symbols_to_update, update_interval="1m", write_to_database=False)
 
     # Print results
     for symbol, result in update_results.items():
         logger.info(f"{symbol}: {result}")
-    
-    # Demonstrate minute-level updates
-    logger.info("Starting minute-level updates...")
-    for symbol in symbols_to_update:  # Only test with first 2 symbols
-        minute_result = minute_update(symbol)
-        logger.info(f"Minute update for {symbol}: {minute_result}")
