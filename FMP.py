@@ -376,7 +376,10 @@ def scheduled_update(symbols: List[str],
 if __name__ == '__main__':
 
     # history
-    symbols_to_update = ["BTCUSD", "ETHUSD", "DOGEUSD", "SOLUSD", "BNBUSD", "XRPUSD"]
+    crypto_to_update = ["BTCUSD", "ETHUSD", "DOGEUSD", "SOLUSD", "BNBUSD", "XRPUSD"]
+    # us_to_update = ["TSLA", "NDX", "NVDA", "AMZN", "GOOGL"]
+    # symbols_to_update = crypto_to_update + us_to_update
+    symbols_to_update = crypto_to_update
     # for symbol in symbols_to_update:
     #     a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
 
