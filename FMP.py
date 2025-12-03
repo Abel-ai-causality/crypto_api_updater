@@ -11,6 +11,8 @@ import requests
 import time
 import logging
 from typing import List
+from datetime import timezone
+import pytz
 
 load_dotenv()
 API_KEY = os.getenv("FMP_API_KEY", "")
@@ -47,12 +49,12 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
 
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    
+
     # FMP的分钟数据API每次可返回最多5000条记录，约为3.47天的分钟数据
     # 使用3天的时间窗口确保在限制内
     # If the start date includes time information, we still make requests by date
     # but will filter the results afterwards
-    delta = timedelta(days=3)
+    delta = timedelta(days=2)
 
     all_data = []
     current_start = start_dt
@@ -76,7 +78,7 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
         try:
             # FMP提供分钟级历史数据的API端点
             url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=30)  # Increased timeout
 
             if resp.status_code != 200:
                 logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
@@ -90,6 +92,10 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
                 # 确保DataFrame有数据且包含必要的列
                 if not df.empty and 'date' in df.columns:
                     df['date'] = pd.to_datetime(df['date'])
+
+                    # Convert from Eastern Time to UTC
+                    eastern_tz = pytz.timezone('US/Eastern')
+                    df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
 
                     # Filter to only include data after the specified start time
                     df = df[df['date'] >= start_dt]
@@ -107,6 +113,8 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
             logger.error(f"Error processing data for {symbol} from {start_str} to {end_str}: {e}")
     else:
         # Handle multi-day requests
+        last_successful_date = None
+
         while current_start.date() <= end_dt.date():
             current_end = min(current_start + delta, end_dt.replace(hour=23, minute=59, second=59))
 
@@ -119,11 +127,15 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
             try:
                 # FMP提供分钟级历史数据的API端点
                 url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
-                resp = requests.get(url, timeout=10)
+                resp = requests.get(url, timeout=30)  # Increased timeout
 
                 if resp.status_code != 200:
                     logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
-                    current_start = current_end + timedelta(days=1)
+                    # Track the last successful date to allow continuation from the gap
+                    if last_successful_date:
+                        current_start = datetime.combine(last_successful_date, datetime.min.time()) + timedelta(days=1)
+                    else:
+                        current_start = current_end + timedelta(days=1)
                     continue
 
                 data = resp.json()
@@ -135,28 +147,42 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
                     if not df.empty and 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
 
+                        # Convert from Eastern Time to UTC
+                        eastern_tz = pytz.timezone('US/Eastern')
+                        df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+
                         # For the first day, filter to only include data after the specified start time
-                        if current_start.date() == start_date_only and start_dt != datetime.combine(start_dt.date(), datetime.min.time()):
+                        if current_start.date() == start_date_only and start_dt != datetime.combine(start_dt.date(),
+                                                                                                    datetime.min.time()):
                             df = df[df['date'] >= start_dt]
 
                         df = df.sort_values("date")
                         all_data.append(df)
+                        last_successful_date = current_end.date()  # Track successful date
                     else:
                         logger.warning(f"No valid data received for {symbol} from {start_str} to {end_str}")
+                        # Even if no data, continue to the next date range
+                        last_successful_date = current_end.date()
                 else:
                     logger.warning(f"No data received for {symbol} from {start_str} to {end_str}")
+                    # Even if no data, continue to the next date range
+                    last_successful_date = current_end.date()
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"Request failed for {symbol} from {start_str} to {end_str}: {e}")
+                # Continue with next date range despite the error
+                last_successful_date = current_end.date()
             except Exception as e:
                 logger.error(f"Error processing data for {symbol} from {start_str} to {end_str}: {e}")
+                # Continue with next date range despite the error
+                last_successful_date = current_end.date()
             finally:
                 # 移动到下一个时间段
                 current_start = current_end + timedelta(days=1)
 
                 # 添加延迟以避免API限频
                 time.sleep(0.25)
-    
+
     # 拼接所有数据
     if all_data:
         full_df = pd.concat(all_data, ignore_index=True)
@@ -171,7 +197,7 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
 def save_to_parquet_file(df: pd.DataFrame, symbol: str) -> None:
     """
     将DataFrame保存到parquet文件，按照年份组织，追加到现有数据
-    
+
     Args:
         df: 包含历史数据的DataFrame
         symbol: 加密货币符号
@@ -198,12 +224,12 @@ def save_to_parquet_file(df: pd.DataFrame, symbol: str) -> None:
         if os.path.exists(file_path):
             # Load existing data
             existing_df = pd.read_parquet(file_path)
-            
+
             # Combine with new data and remove duplicates
             combined_df = pd.concat([existing_df, year_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['date'], keep='last')
             combined_df = combined_df.sort_values('date')
-            
+
             # Save to parquet
             combined_df.to_parquet(file_path, index=False)
             logger.info(f"Updated {file_path} with {len(year_df)} new rows, total rows: {len(combined_df)}")
@@ -226,45 +252,57 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
     """
     # Find the most recent year for the symbol
     base_path = os.path.join(os.getenv("BASE_DATA_DIR", "/root/data"), "crypto", "1min", symbol)
-    
+
     if not os.path.exists(base_path):
         logger.warning(f"No existing data found for symbol {symbol}")
         return pd.DataFrame()
-    
+
     # Find all year directories
-    years = [d for d in os.listdir(base_path) 
+    years = [d for d in os.listdir(base_path)
              if os.path.isdir(os.path.join(base_path, d)) and d.isdigit()]
-    
+
     if not years:
         logger.warning(f"No year directories found for symbol {symbol}")
         return pd.DataFrame()
-    
+
     # Sort years in descending order to get the most recent first
     years.sort(reverse=True)
-    
+
     all_data = []
     rows_needed = limit
-    
+
     for year in years:
         file_path = os.path.join(base_path, year, "data.parquet")
-        
+
         if os.path.exists(file_path):
             try:
                 df = pd.read_parquet(file_path)
+
+                # Ensure date column is in UTC timezone if it exists
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                    if df['date'].dt.tz is None:
+                        # Assume it's in Eastern Time and convert to UTC
+                        eastern_tz = pytz.timezone('US/Eastern')
+                        df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+
+                if df.empty:
+                    continue
+
                 df = df.sort_values('date', ascending=False)  # Sort descending to get latest first
-                
+
                 if len(df) >= rows_needed:
                     all_data.append(df.head(rows_needed))
                     break
                 else:
                     all_data.append(df)
                     rows_needed -= len(df)
-                    
+
                 if rows_needed <= 0:
                     break
             except Exception as e:
                 logger.error(f"Error reading data for {symbol} from {file_path}: {e}")
-    
+
     if all_data:
         result = pd.concat(all_data, ignore_index=True)
         result = result.sort_values('date', ascending=False)  # Most recent first
@@ -305,25 +343,27 @@ def scheduled_update(symbols: List[str],
             if not latest_df.empty and 'date' in latest_df.columns:
                 # 获取最新数据的日期，并从下一分钟开始获取新数据
                 latest_date = latest_df['date'].max()
-                start_date = (latest_date + timedelta(minutes=1)).strftime("%Y-%m-%d")
-                start_time = latest_date.strftime("%H:%M:%S")
+                # Calculate the next minute from the latest data point
+                next_datetime = latest_date + timedelta(minutes=1)
+                start_date = next_datetime.strftime("%Y-%m-%d")
+                start_time = next_datetime.strftime("%H:%M:%S")
 
-                # 如果最新数据是今天之前的日期，则从当天00:00:00开始获取
-                if latest_date.date() < datetime.now().date():
-                    start_date = latest_date.strftime("%Y-%m-%d")
-                    start_time = "00:00:00"
+                logger.info(
+                    f"Latest data for {symbol} found at {latest_date}, starting update from {start_date} {start_time}")
 
-                logger.info(f"Latest data for {symbol} found at {latest_date}, starting update from {start_date} {start_time}")
+                # Combine date and time for the actual start
+                actual_start = f"{start_date} {start_time}"
             else:
                 # 如果没有现有数据，则从30天前开始获取
                 start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                actual_start = start_date  # Use only date for initial fetch
                 logger.info(f"No existing data for {symbol}, starting update from {start_date}")
 
             # 结束日期为今天
             end_date = datetime.now().strftime("%Y-%m-%d")
 
             # 获取数据
-            data = get_1min_historical_data(symbol, start_date, end_date, api_key)
+            data = get_1min_historical_data(symbol, actual_start, end_date, api_key)
 
             if not data.empty:
                 # 过滤数据，只保留从最新日期之后的数据（避免重复）
@@ -342,7 +382,8 @@ def scheduled_update(symbols: List[str],
                     results[symbol] = {
                         "status": "success",
                         "rows_inserted": len(data),
-                        "date_range": [str(data['date'].min()), str(data['date'].max())] if 'date' in data.columns else "N/A"
+                        "date_range": [str(data['date'].min()),
+                                       str(data['date'].max())] if 'date' in data.columns else "N/A"
                     }
                     logger.info(f"Successfully updated {symbol}, {len(data)} rows inserted")
                 else:
@@ -380,8 +421,8 @@ if __name__ == '__main__':
     # us_to_update = ["TSLA", "NDX", "NVDA", "AMZN", "GOOGL"]
     # symbols_to_update = crypto_to_update + us_to_update
     symbols_to_update = crypto_to_update
-    # for symbol in symbols_to_update:
-    #     a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
+    for symbol in symbols_to_update:
+        a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
 
     # update
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
