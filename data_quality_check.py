@@ -61,6 +61,10 @@ def check_data_integrity(base_path: str = "D:\\data") -> Dict[str, any]:
                     df = pd.read_parquet(file_path)
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
+                        # Ensure date column is timezone-aware (in UTC)
+                        if df['date'].dt.tz is None:
+                            # If no timezone info, assume it's in UTC as per FMP updates
+                            df['date'] = df['date'].dt.tz_localize('UTC')
                         all_data.append(df)
                         logger.info(f"Symbol {symbol}, Year {year}: {len(df)} records")
                         
@@ -263,13 +267,20 @@ def check_daily_coverage(df: pd.DataFrame, symbol: str) -> List[Dict]:
     if 'date' not in df.columns:
         return gaps
 
+    # For timezone-aware dates, we need to handle the date extraction properly
+    # Convert to UTC timezone-naive for date operations, then back if needed
+    if df['date'].dt.tz is not None:
+        date_col = df['date'].dt.tz_localize(None)  # Remove timezone info for date operations
+    else:
+        date_col = df['date']
+
     # Create a complete date range
-    start_date = df['date'].min().date()
-    end_date = df['date'].max().date()
+    start_date = date_col.min().date()
+    end_date = date_col.max().date()
 
     # Generate all dates between start and end
     full_date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    available_dates = df['date'].dt.date.unique()
+    available_dates = date_col.dt.date.unique()
 
     # Find missing dates
     missing_dates = [date for date in full_date_range.date if date not in available_dates]

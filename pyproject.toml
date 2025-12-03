@@ -22,7 +22,8 @@ dependencies = [
     "psycopg2-binary",
     "sqlalchemy",
     "dotenv (>=0.9.9,<0.10.0)",
-    "pyarrow (>=22.0.0,<23.0.0)"
+    "pyarrow (>=22.0.0,<23.0.0)",
+    "pytz"
 ]
 
 [tool.poetry.group.dev.dependencies]

@@ -93,12 +93,20 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
                 if not df.empty and 'date' in df.columns:
                     df['date'] = pd.to_datetime(df['date'])
 
-                    # Convert from Eastern Time to UTC
+                    # Convert from Eastern Time to UTC first
                     eastern_tz = pytz.timezone('US/Eastern')
                     df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
 
+                    # Now convert start_dt to UTC for proper comparison with the UTC data
+                    if start_dt.tzinfo is None:
+                        # If start_dt is naive, assume it's in UTC (as it comes from scheduled_update calculations)
+                        start_dt_utc = start_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        # If start_dt already has timezone info, convert it to UTC
+                        start_dt_utc = start_dt.astimezone(timezone.utc)
+
                     # Filter to only include data after the specified start time
-                    df = df[df['date'] >= start_dt]
+                    df = df[df['date'] >= start_dt_utc]
 
                     df = df.sort_values("date")
                     all_data.append(df)
@@ -147,14 +155,22 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
                     if not df.empty and 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
 
-                        # Convert from Eastern Time to UTC
+                        # Convert from Eastern Time to UTC first
                         eastern_tz = pytz.timezone('US/Eastern')
                         df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+
+                        # Now convert start_dt to UTC for proper comparison with the UTC data
+                        if start_dt.tzinfo is None:
+                            # If start_dt is naive, assume it's in UTC (as it comes from scheduled_update calculations)
+                            start_dt_utc = start_dt.replace(tzinfo=timezone.utc)
+                        else:
+                            # If start_dt already has timezone info, convert it to UTC
+                            start_dt_utc = start_dt.astimezone(timezone.utc)
 
                         # For the first day, filter to only include data after the specified start time
                         if current_start.date() == start_date_only and start_dt != datetime.combine(start_dt.date(),
                                                                                                     datetime.min.time()):
-                            df = df[df['date'] >= start_dt]
+                            df = df[df['date'] >= start_dt_utc]
 
                         df = df.sort_values("date")
                         all_data.append(df)
@@ -311,7 +327,8 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def scheduled_update(symbols: List[str],
+def scheduled_update\
+                (symbols: List[str],
                      api_key: str = API_KEY,
                      db_table_prefix: str = "FMP",
                      write_to_database: bool = False) -> dict:
@@ -355,12 +372,13 @@ def scheduled_update(symbols: List[str],
                 actual_start = f"{start_date} {start_time}"
             else:
                 # 如果没有现有数据，则从30天前开始获取
-                start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                # Use UTC time for consistency
+                start_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
                 actual_start = start_date  # Use only date for initial fetch
                 logger.info(f"No existing data for {symbol}, starting update from {start_date}")
 
-            # 结束日期为今天
-            end_date = datetime.now().strftime("%Y-%m-%d")
+            # 结束日期为今天 (in UTC)
+            end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
             # 获取数据
             data = get_1min_historical_data(symbol, actual_start, end_date, api_key)
@@ -428,8 +446,8 @@ if __name__ == '__main__':
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
 
     # Perform the scheduled update (without writing to DB for testing)
-    update_results = scheduled_update(symbols=symbols_to_update, write_to_database=False)
+    # update_results = scheduled_update(symbols=symbols_to_update, write_to_database=False)
 
     # Print results
-    for symbol, result in update_results.items():
-        logger.info(f"{symbol}: {result}")
+    # for symbol, result in update_results.items():
+    #     logger.info(f"{symbol}: {result}")
