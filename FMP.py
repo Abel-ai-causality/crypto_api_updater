@@ -95,7 +95,8 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
 
                     # Convert from Eastern Time to UTC first
                     eastern_tz = pytz.timezone('US/Eastern')
-                    df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+                    # Use tz_localize with ambiguous='infer' to handle DST transitions
+                    df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
 
                     # Now convert start_dt to UTC for proper comparison with the UTC data
                     if start_dt.tzinfo is None:
@@ -157,7 +158,8 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
 
                         # Convert from Eastern Time to UTC first
                         eastern_tz = pytz.timezone('US/Eastern')
-                        df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+                        # Use tz_localize with ambiguous='infer' to handle DST transitions
+                        df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
 
                         # Now convert start_dt to UTC for proper comparison with the UTC data
                         if start_dt.tzinfo is None:
@@ -300,7 +302,8 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
                     if df['date'].dt.tz is None:
                         # Assume it's in Eastern Time and convert to UTC
                         eastern_tz = pytz.timezone('US/Eastern')
-                        df['date'] = df['date'].dt.tz_localize(eastern_tz).dt.tz_convert('UTC')
+                        # Use tz_localize with ambiguous='infer' to handle DST transitions
+                        df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
 
                 if df.empty:
                     continue
@@ -439,15 +442,15 @@ if __name__ == '__main__':
     # us_to_update = ["TSLA", "NDX", "NVDA", "AMZN", "GOOGL"]
     # symbols_to_update = crypto_to_update + us_to_update
     symbols_to_update = crypto_to_update
-    for symbol in symbols_to_update:
-        a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
+    # for symbol in symbols_to_update:
+    #     a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
 
     # update
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
 
     # Perform the scheduled update (without writing to DB for testing)
-    # update_results = scheduled_update(symbols=symbols_to_update, write_to_database=False)
+    update_results = scheduled_update(symbols=symbols_to_update, write_to_database=False)
 
     # Print results
-    # for symbol, result in update_results.items():
-    #     logger.info(f"{symbol}: {result}")
+    for symbol, result in update_results.items():
+        logger.info(f"{symbol}: {result}")
