@@ -78,7 +78,7 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
         try:
             # FMP提供分钟级历史数据的API端点
             url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
-            resp = requests.get(url, timeout=30)  # Increased timeout
+            resp = requests.get(url, timeout=60)  # Increased timeout
 
             if resp.status_code != 200:
                 logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
@@ -95,8 +95,10 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
 
                     # Convert from Eastern Time to UTC first
                     eastern_tz = pytz.timezone('US/Eastern')
-                    # Use tz_localize with ambiguous='infer' to handle DST transitions
-                    df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
+                    # Handle ambiguous datetimes during DST transitions
+                    df['date'] = df['date'].apply(
+                        lambda x: eastern_tz.localize(x, is_dst=None) if pd.notna(x) else x
+                    ).dt.tz_convert('UTC')
 
                     # Now convert start_dt to UTC for proper comparison with the UTC data
                     if start_dt.tzinfo is None:
@@ -136,7 +138,7 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
             try:
                 # FMP提供分钟级历史数据的API端点
                 url = f"https://financialmodelingprep.com/stable/historical-chart/1min?symbol={symbol}&apikey={api_key}&from={start_str}&to={end_str}"
-                resp = requests.get(url, timeout=30)  # Increased timeout
+                resp = requests.get(url, timeout=60)  # Increased timeout
 
                 if resp.status_code != 200:
                     logger.error(f"API request failed with status {resp.status_code}: {resp.text}")
@@ -158,8 +160,11 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
 
                         # Convert from Eastern Time to UTC first
                         eastern_tz = pytz.timezone('US/Eastern')
-                        # Use tz_localize with ambiguous='infer' to handle DST transitions
-                        df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
+                        # Handle ambiguous datetimes during DST transitions
+
+                        df['date'] = df['date'].apply(
+                            lambda x: eastern_tz.localize(x, is_dst=None) if pd.notna(x) else x
+                        ).dt.tz_convert('UTC')
 
                         # Now convert start_dt to UTC for proper comparison with the UTC data
                         if start_dt.tzinfo is None:
@@ -209,7 +214,6 @@ def get_1min_historical_data(symbol: str, start_date: str, end_date: str,
         return full_df
     else:
         return pd.DataFrame()
-
 
 
 def save_to_parquet_file(df: pd.DataFrame, symbol: str) -> None:
@@ -302,8 +306,10 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
                     if df['date'].dt.tz is None:
                         # Assume it's in Eastern Time and convert to UTC
                         eastern_tz = pytz.timezone('US/Eastern')
-                        # Use tz_localize with ambiguous='infer' to handle DST transitions
-                        df['date'] = df['date'].dt.tz_localize(eastern_tz, ambiguous='infer').dt.tz_convert('UTC')
+                        # Handle ambiguous datetimes during DST transitions
+                        df['date'] = df['date'].apply(
+                            lambda x: eastern_tz.localize(x, is_dst=None) if pd.notna(x) else x
+                        ).dt.tz_convert('UTC')
 
                 if df.empty:
                     continue
@@ -330,11 +336,11 @@ def get_latest_data(symbol: str, limit: int = 1) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def scheduled_update\
+def scheduled_update \
                 (symbols: List[str],
-                     api_key: str = API_KEY,
-                     db_table_prefix: str = "FMP",
-                     write_to_database: bool = False) -> dict:
+                 api_key: str = API_KEY,
+                 db_table_prefix: str = "FMP",
+                 write_to_database: bool = False) -> dict:
     """
     定时更新数据到数据库
 
@@ -442,8 +448,8 @@ if __name__ == '__main__':
     # us_to_update = ["TSLA", "NDX", "NVDA", "AMZN", "GOOGL"]
     # symbols_to_update = crypto_to_update + us_to_update
     symbols_to_update = crypto_to_update
-    # for symbol in symbols_to_update:
-    #     a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2022-10-25")
+    for symbol in symbols_to_update:
+        a = get_1min_historical_data(symbol, start_date="2022-10-12", end_date="2025-11-25")
 
     # update
     logger.info(f"Starting scheduled update for {len(symbols_to_update)} symbols...")
